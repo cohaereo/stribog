@@ -1,4 +1,5 @@
 use rerun::{
+    Radius,
     components::GeoLineString,
     external::re_types::blueprint::{
         archetypes::{MapBackground, MapZoom},
@@ -124,7 +125,7 @@ fn main() -> anyhow::Result<()> {
                         // if avg_amp < 0.1 {
                         //     continue;
                         // }
-                        let data_bytes = pulses_to_bytes(&data_raw);
+                        let mut data_bytes = pulses_to_bytes(&data_raw);
                         // if data_bytes[0] != 0x5d && data_bytes[0] != 0x8d {
                         //     continue;
                         // }
@@ -158,10 +159,19 @@ fn main() -> anyhow::Result<()> {
                         };
 
                         if crc_calculated != crc_message {
-                            // error!(
-                            //     "CRC mismatch: calculated {crc_calculated:08X}, message {crc_message:08X}"
-                            // );
-                            continue;
+                            if let Some(fix_pos) = fix_single_bit_error(&mut data_bytes, bits) {
+                                warn!("Fixed bit at position {}", fix_pos);
+                            } else {
+                                // TODO(cohae): double bit error correction is quite slow. if we want to use it we will need to parallelize the program first
+                                // if let Some(fix_pos) = fix_double_bit_error(&mut data_bytes, bits) {
+                                //     warn!("Fixed 2 bits at position {}", fix_pos);
+                                // } else {
+                                //     // error!(
+                                //     //     "CRC mismatch: calculated {crc_calculated:08X}, message {crc_message:08X}"
+                                //     // );
+                                continue;
+                                // }
+                            }
                         }
                         info!("CRC ok ({crc_calculated:08X})");
                         // info!("CRC: {crc_calculated:08X}, Message: {crc_message:08X}");
@@ -364,7 +374,7 @@ fn main() -> anyhow::Result<()> {
                                     info!("  Altitude: {:?}", altitude);
                                     info!("  Latitude: {} (not decoded)", encoded_latitude);
                                     info!("  Longitude: {} (not decoded)", encoded_longitude);
-                                    warn!("  Lat/Long: {:?}", craft.latlong());
+                                    info!("  Lat/Long: {:?}", craft.latlong());
 
                                     if let Some((lat, long)) = craft.latlong() {
                                         rec.log(
@@ -375,16 +385,25 @@ fn main() -> anyhow::Result<()> {
                                         )?;
                                         rec.log(
                                             format!("world/plane/{}", craft.icao),
-                                            &rerun::GeoPoints::from_lat_lon([(lat, long)]),
+                                            &rerun::GeoPoints::from_lat_lon(&craft.path)
+                                                .with_radii(craft.path.iter().enumerate().map(
+                                                    |(i, _)| {
+                                                        if i == craft.path.len() - 1 {
+                                                            Radius::new_ui_points(10.0)
+                                                        } else {
+                                                            Radius::new_ui_points(5.0)
+                                                        }
+                                                    },
+                                                )),
                                         )?;
-                                        rec.log(
-                                            "logs",
-                                            &rerun::TextLog::new(format!(
-                                                "Craft {} updated lat/long to {lat:.2}/{long:.2}",
-                                                craft.icao
-                                            ))
-                                            .with_level(rerun::TextLogLevel::DEBUG),
-                                        )?;
+                                        // rec.log(
+                                        //     "logs",
+                                        //     &rerun::TextLog::new(format!(
+                                        //         "Craft {} updated lat/long to {lat:.2}/{long:.2}",
+                                        //         craft.icao
+                                        //     ))
+                                        //     .with_level(rerun::TextLogLevel::DEBUG),
+                                        // )?;
                                     }
                                 }
                                 u => {
@@ -747,4 +766,60 @@ fn mode_s_checksum(data: &[u8], bits: usize) -> u32 {
     }
 
     crc
+}
+
+fn fix_single_bit_error(data: &mut [u8], bits: usize) -> Option<usize> {
+    let mut corrected = [0u8; 112 / 8];
+
+    for j in 0..bits {
+        let byte = j / 8;
+        let bit = j % 8;
+        let bitmask = 1 << (7 - bit);
+
+        corrected.copy_from_slice(data);
+        corrected[byte] ^= bitmask;
+        let end = bits / 8;
+        let crc1 = (corrected[end - 3] as u32) << 16
+            | (corrected[end - 2] as u32) << 8
+            | corrected[end - 1] as u32;
+        let crc2 = mode_s_checksum(&corrected, bits);
+        if crc1 == crc2 {
+            data[0..112 / 8].copy_from_slice(&corrected);
+            return Some(j);
+        }
+    }
+
+    None
+}
+
+fn fix_double_bit_error(data: &mut [u8], bits: usize) -> Option<usize> {
+    let mut corrected = [0u8; 112 / 8];
+
+    for j in 0..bits {
+        let byte1 = j / 8;
+        let bit1 = j % 8;
+        let bitmask1 = 1 << (7 - bit1);
+
+        for i in j + 1..bits {
+            let byte2 = i / 8;
+            let bit2 = i % 8;
+            let bitmask2 = 1 << (7 - bit2);
+
+            corrected.copy_from_slice(data);
+            corrected[byte1] ^= bitmask1;
+            corrected[byte2] ^= bitmask2;
+
+            let end = bits / 8;
+            let crc1 = (corrected[end - 3] as u32) << 16
+                | (corrected[end - 2] as u32) << 8
+                | corrected[end - 1] as u32;
+            let crc2 = mode_s_checksum(&corrected, bits);
+            if crc1 == crc2 {
+                data[0..112 / 8].copy_from_slice(&corrected);
+                return Some(j);
+            }
+        }
+    }
+
+    None
 }
