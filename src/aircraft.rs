@@ -3,6 +3,9 @@ use std::{
     time::Instant,
 };
 
+use glam::{DVec2, Vec2Swizzles};
+use rerun::{Radius, components::GeoLineString};
+
 use crate::cpr;
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -41,8 +44,14 @@ pub struct Aircraft {
 
     pub latitude: f64,
     pub longitude: f64,
+    pub last_pos_update: Instant,
+
+    pub latitude_interpolated: f64,
+    pub longitude_interpolated: f64,
 
     pub path: Vec<(f64, f64)>,
+
+    pub velocity_kts: DVec2,
 }
 
 impl Aircraft {
@@ -58,7 +67,11 @@ impl Aircraft {
             odd_cprtime: Instant::now(),
             latitude: 0.0,
             longitude: 0.0,
+            last_pos_update: Instant::now(),
+            latitude_interpolated: 0.0,
+            longitude_interpolated: 0.0,
             path: Vec::new(),
+            velocity_kts: DVec2::ZERO,
         }
     }
 
@@ -86,7 +99,40 @@ impl Aircraft {
 
         if let Some(latlon) = cpr::decode_cpr(self) {
             (self.latitude, self.longitude) = latlon;
+            (self.latitude_interpolated, self.longitude_interpolated) = latlon;
             self.path.push(latlon);
+            self.last_pos_update = Instant::now();
         }
+    }
+
+    pub fn log_rerun(&self, rec: &rerun::RecordingStream) -> anyhow::Result<()> {
+        macro_rules! path_with_prediction {
+            () => {
+                self.path
+                    .iter()
+                    .chain([(self.latitude_interpolated, self.longitude_interpolated)].iter())
+            };
+        }
+
+        rec.log(
+            format!("world/plane/{}", self.icao),
+            &rerun::GeoLineStrings::from_lat_lon([GeoLineString::from_iter(
+                path_with_prediction!(),
+            )]),
+        )?;
+        rec.log(
+            format!("world/plane/{}", self.icao),
+            &rerun::GeoPoints::from_lat_lon(path_with_prediction!()).with_radii(
+                path_with_prediction!().enumerate().map(|(i, _)| {
+                    if i == self.path.len() {
+                        Radius::new_ui_points(10.0)
+                    } else {
+                        Radius::new_ui_points(5.0)
+                    }
+                }),
+            ),
+        )?;
+
+        Ok(())
     }
 }

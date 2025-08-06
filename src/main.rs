@@ -1,4 +1,4 @@
-use rerun::{Radius, components::GeoLineString};
+use glam::DVec2;
 use rtlsdr_rs::{RtlSdr, TunerGain};
 use std::{
     borrow::Cow,
@@ -72,6 +72,8 @@ fn main() -> anyhow::Result<()> {
     let mut aircrafts = HashMap::<Icao, Aircraft>::new();
     let rec = rerun::RecordingStreamBuilder::new("stribog").connect_grpc()?;
 
+    let mut last_tick = Instant::now();
+
     loop {
         match sdr.read_sync(&mut buf) {
             Ok(n) => {
@@ -88,6 +90,30 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 for samples in samples.windows(240) {
+                    if last_tick.elapsed().as_millis() > 100 {
+                        for (_, craft) in aircrafts.iter_mut() {
+                            if craft.velocity_kts.length() <= f64::EPSILON
+                                || craft.latlong().is_none()
+                            {
+                                continue;
+                            }
+
+                            let d_meters_per_sec = craft.velocity_kts * 0.5144444444;
+                            let d_meters_per_tick = d_meters_per_sec / 10.0;
+                            let [dx, dy] = d_meters_per_tick.to_array();
+                            const R: f64 = 6_371_000.0;
+                            let dlat = dy / R;
+                            let dlon = dx / (R * craft.latitude_interpolated.to_radians().cos());
+
+                            craft.latitude_interpolated += dlat.to_degrees();
+                            craft.longitude_interpolated += dlon.to_degrees();
+
+                            craft.log_rerun(&rec)?;
+                        }
+                        // send interpolated samples for all aircrafts to rerun for visualization sake
+                        last_tick = Instant::now();
+                    }
+
                     if check_preamble(samples) {
                         let data_raw = &samples[16..];
                         // let avg_amp = data_raw.iter().sum::<f32>() / data_raw.len() as f32;
@@ -303,33 +329,39 @@ fn main() -> anyhow::Result<()> {
                                     info!("  Lat/Long: {:?}", craft.latlong());
 
                                     if craft.latlong().is_some() {
-                                        rec.log(
-                                            format!("world/plane/{}", craft.icao),
-                                            &rerun::GeoLineStrings::from_lat_lon([
-                                                GeoLineString::from_iter(&craft.path),
-                                            ]),
-                                        )?;
-                                        rec.log(
-                                            format!("world/plane/{}", craft.icao),
-                                            &rerun::GeoPoints::from_lat_lon(&craft.path)
-                                                .with_radii(craft.path.iter().enumerate().map(
-                                                    |(i, _)| {
-                                                        if i == craft.path.len() - 1 {
-                                                            Radius::new_ui_points(10.0)
-                                                        } else {
-                                                            Radius::new_ui_points(5.0)
-                                                        }
-                                                    },
-                                                )),
-                                        )?;
-                                        // rec.log(
-                                        //     "logs",
-                                        //     &rerun::TextLog::new(format!(
-                                        //         "Craft {} updated lat/long to {lat:.2}/{long:.2}",
-                                        //         craft.icao
-                                        //     ))
-                                        //     .with_level(rerun::TextLogLevel::DEBUG),
-                                        // )?;
+                                        craft.log_rerun(&rec)?;
+                                    }
+                                }
+                                19 => {
+                                    let subtype = msg.read_bits(3);
+                                    let _intent_change = msg.read_bit();
+                                    let _ifr_capable = msg.read_bit();
+                                    let _nuc = msg.read_bits(3);
+                                    match subtype {
+                                        // Ground-based velocity (despite it's name also applies to airborne aircraft)
+                                        1 | 2 => {
+                                            let horizontal_dir = msg.read_bits(1); // 0=east, 1=west
+                                            let mut horizontal_speed = msg.read_bits(10) - 1;
+                                            let vertical_dir = msg.read_bits(1); // 0=north, 1=south
+                                            let mut vertical_speed = msg.read_bits(10) - 1;
+
+                                            let hsign = if horizontal_dir == 1 { -1 } else { 1 };
+                                            let vsign = if vertical_dir == 1 { -1 } else { 1 };
+
+                                            // Used for supersonic aircraft (rarely, if ever seen these days)
+                                            if subtype == 2 {
+                                                horizontal_speed *= 4;
+                                                vertical_speed *= 4;
+                                            }
+
+                                            let velocity = DVec2::new(
+                                                horizontal_speed as f64 * hsign as f64,
+                                                vertical_speed as f64 * vsign as f64,
+                                            );
+
+                                            craft.velocity_kts = velocity;
+                                        }
+                                        u => error!("Unhandled velocity subtype {u}"),
                                     }
                                 }
                                 u => {
