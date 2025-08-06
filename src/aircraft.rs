@@ -63,7 +63,7 @@ impl Aircraft {
     }
 
     pub fn latlong(&self) -> Option<(f64, f64)> {
-        (self.latitude != 0.0 && self.longitude != 0.0).then(|| (self.latitude, self.longitude))
+        (self.latitude != 0.0 && self.longitude != 0.0).then_some((self.latitude, self.longitude))
     }
 
     pub fn update_latlong(&mut self) {

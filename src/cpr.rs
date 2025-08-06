@@ -74,7 +74,7 @@ fn cpr_dlon(lat: f64, is_odd: bool) -> f64 {
 }
 
 /// Calculate the longitude zone number for the given latitude
-fn cpr_nl(mut lat: f64) -> i32 {
+fn cpr_nl(lat: f64) -> i32 {
     // The number of longitude zones
     const NZ: f64 = 15.0;
 
