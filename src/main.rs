@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    aircraft::{Aircraft, Icao},
+    aircraft::{Aircraft, Altitude, Icao},
     bitreader::BitReader,
 };
 mod aircraft;
@@ -92,13 +92,15 @@ fn main() -> anyhow::Result<()> {
                 for samples in samples.windows(240) {
                     if last_tick.elapsed().as_millis() > 100 {
                         for (_, craft) in aircrafts.iter_mut() {
-                            if craft.velocity_kts.length() <= f64::EPSILON
-                                || craft.latlong().is_none()
-                            {
+                            if craft.latlong().is_none() {
                                 continue;
                             }
 
-                            let d_meters_per_sec = craft.velocity_kts * 0.5144444444;
+                            let Some(velocity_kts) = craft.velocity_kts else {
+                                continue;
+                            };
+
+                            let d_meters_per_sec = velocity_kts * 0.5144444444;
                             let d_meters_per_tick = d_meters_per_sec / 10.0;
                             let [dx, dy] = d_meters_per_tick.to_array();
                             const R: f64 = 6_371_000.0;
@@ -317,6 +319,7 @@ fn main() -> anyhow::Result<()> {
                                     } else {
                                         Altitude::Meters(encoded_altitude)
                                     };
+                                    craft.altitude = Some(altitude);
 
                                     info!("  Surveillance status: {}", surveillance_status);
                                     info!(
@@ -359,7 +362,7 @@ fn main() -> anyhow::Result<()> {
                                                 vertical_speed as f64 * vsign as f64,
                                             );
 
-                                            craft.velocity_kts = velocity;
+                                            craft.velocity_kts = Some(velocity);
                                         }
                                         u => error!("Unhandled velocity subtype {u}"),
                                     }
@@ -377,28 +380,6 @@ fn main() -> anyhow::Result<()> {
             Err(e) => {
                 error!("Read error: {e:#?}");
             }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum Altitude {
-    Feet(u32),
-    Meters(u32),
-}
-
-impl Altitude {
-    fn to_feet(&self) -> Self {
-        match self {
-            Self::Feet(feet) => Self::Feet(*feet),
-            Self::Meters(meters) => Self::Feet((*meters as f32 * 3.28084) as u32),
-        }
-    }
-
-    fn to_meters(&self) -> Self {
-        match self {
-            Self::Feet(feet) => Self::Meters((*feet as f32 / 3.28084) as u32),
-            Self::Meters(meters) => Self::Meters(*meters),
         }
     }
 }

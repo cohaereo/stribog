@@ -3,7 +3,7 @@ use std::{
     time::Instant,
 };
 
-use glam::{DVec2, Vec2Swizzles};
+use glam::DVec2;
 use rerun::{Radius, components::GeoLineString};
 
 use crate::cpr;
@@ -42,6 +42,7 @@ pub struct Aircraft {
     pub odd_cprlon: u32,
     pub odd_cprtime: Instant,
 
+    pub altitude: Option<Altitude>,
     pub latitude: f64,
     pub longitude: f64,
     pub last_pos_update: Instant,
@@ -51,7 +52,7 @@ pub struct Aircraft {
 
     pub path: Vec<(f64, f64)>,
 
-    pub velocity_kts: DVec2,
+    pub velocity_kts: Option<DVec2>,
 }
 
 impl Aircraft {
@@ -65,13 +66,14 @@ impl Aircraft {
             odd_cprlat: 0,
             odd_cprlon: 0,
             odd_cprtime: Instant::now(),
+            altitude: None,
             latitude: 0.0,
             longitude: 0.0,
             last_pos_update: Instant::now(),
             latitude_interpolated: 0.0,
             longitude_interpolated: 0.0,
             path: Vec::new(),
-            velocity_kts: DVec2::ZERO,
+            velocity_kts: None,
         }
     }
 
@@ -105,6 +107,20 @@ impl Aircraft {
         }
     }
 
+    pub fn speed_kts(&self) -> Option<f64> {
+        self.velocity_kts.map(|v| v.length())
+    }
+
+    pub fn heading(&self) -> Option<f64> {
+        self.velocity_kts.map(|v| {
+            let mut a = v.x.atan2(v.y).to_degrees();
+            if a < 0.0 {
+                a += 360.0;
+            }
+            a
+        })
+    }
+
     pub fn log_rerun(&self, rec: &rerun::RecordingStream) -> anyhow::Result<()> {
         macro_rules! path_with_prediction {
             () => {
@@ -114,14 +130,15 @@ impl Aircraft {
             };
         }
 
+        let ent_path = format!("world/plane/{}", self.icao);
         rec.log(
-            format!("world/plane/{}", self.icao),
+            ent_path.clone(),
             &rerun::GeoLineStrings::from_lat_lon([GeoLineString::from_iter(
                 path_with_prediction!(),
             )]),
         )?;
         rec.log(
-            format!("world/plane/{}", self.icao),
+            ent_path.clone(),
             &rerun::GeoPoints::from_lat_lon(path_with_prediction!()).with_radii(
                 path_with_prediction!().enumerate().map(|(i, _)| {
                     if i == self.path.len() {
@@ -133,6 +150,55 @@ impl Aircraft {
             ),
         )?;
 
+        let speed_kts = self
+            .speed_kts()
+            .map(|s| format!("{s:.2}"))
+            .unwrap_or("pending".to_string());
+
+        let heading = self
+            .heading()
+            .map(|h| format!("{h:.0} deg"))
+            .unwrap_or("pending".to_string());
+
+        let data = rerun::AnyValues::default()
+            .with_component::<rerun::components::Text>(
+                "callsign",
+                vec![
+                    self.callsign
+                        .clone()
+                        .unwrap_or_else(|| "pending".to_string()),
+                ],
+            )
+            .with_component::<rerun::components::Text>("speed_kts", vec![speed_kts])
+            .with_component::<rerun::components::Text>("heading", vec![heading])
+            .with_component::<rerun::components::LatLon>(
+                "latlong",
+                vec![(self.latitude, self.longitude)],
+            );
+        rec.log(ent_path, &data)?;
+
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Altitude {
+    Feet(u32),
+    Meters(u32),
+}
+
+impl Altitude {
+    pub fn to_feet(self) -> Self {
+        match self {
+            Self::Feet(feet) => Self::Feet(feet),
+            Self::Meters(meters) => Self::Feet((meters as f32 * 3.28084) as u32),
+        }
+    }
+
+    pub fn to_meters(self) -> Self {
+        match self {
+            Self::Feet(feet) => Self::Meters((feet as f32 / 3.28084) as u32),
+            Self::Meters(meters) => Self::Meters(meters),
+        }
     }
 }
