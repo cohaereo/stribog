@@ -54,7 +54,7 @@ pub fn decode_cpr(a: &Aircraft) -> Option<(f64, f64)> {
 }
 
 fn cpr_mod(a: i32, b: i32) -> i32 {
-    let mut res = a & b;
+    let mut res = a % b;
     if res < 0 {
         res += b;
     }
